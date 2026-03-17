@@ -3,11 +3,12 @@ import os
 import httpx
 import asyncio
 from schemas import TaskType, LLMRequest, LLMResponse
+from config import settings
 
 # Model mapping for Groq
 GROQ_MODELS = {
     TaskType.fast: "llama-3.1-8b-instant",        # Fast → Llama 3.1 8B
-    TaskType.analysis: "qwen-qwq-32b",            # Analysis → Qwen QWQ 32B
+    TaskType.analysis: "llama-3.3-70b-versatile", # Analysis → Llama 3.3 70B (more reliable)
     TaskType.fix: "llama-3.3-70b-versatile",      # Fix → Llama 3.3 70B
 }
 
@@ -119,8 +120,8 @@ async def route_llm(request: LLMRequest) -> LLMResponse:
     2. Fallback to OpenAI
     3. Graceful fallback on 429s/failures
     """
-    groq_api_key = os.getenv("GROQ_API_KEY", "").strip()
-    openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    groq_api_key = settings.GROQ_API_KEY.strip()
+    openai_api_key = settings.OPENAI_API_KEY.strip()
 
     # Try Groq first
     if groq_api_key and not groq_api_key.startswith("your_"):
@@ -144,6 +145,7 @@ async def route_llm(request: LLMRequest) -> LLMResponse:
                     fallback_used=True,
                 )
 
+    print(f"[LLM Router] Critical: No API keys configured or all providers failed. Request type: {request.task_type}")
     # No keys or all failed - return mock response for demo
     model_name = GROQ_MODELS[request.task_type]
     return LLMResponse(

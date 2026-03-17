@@ -7,6 +7,7 @@ import json
 from datetime import datetime, timedelta
 from faker import Faker
 from schemas import Anomaly
+from config import settings
 
 fake = Faker()
 
@@ -150,19 +151,26 @@ def _fill_template(template: str) -> str:
 
 
 LOG_FILE = "log.txt"
+LOG_FILE_JSON = "logs.json"
 
 def _save_to_log_file(log: dict):
-    """Saves a log entry to log.txt in the format: YYYY-MM-DD HH:mm:ss LEVEL Source Message"""
+    """Saves a log entry to log.txt and logs.json"""
     try:
-        ts = log["timestamp"].replace("T", " ").split(".")[0]
-        line = f"{ts} {log['level']} {log['service']} {log['message']}\n"
+        # Save to text file (parseable format)
+        ts_text = log["timestamp"].replace("T", " ").split(".")[0]
+        line = f"{ts_text} {log['level']} {log['service']} {log['message']}\n"
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(line)
+            
+        # Save to JSON file (raw/JSON format)
+        with open(LOG_FILE_JSON, "a", encoding="utf-8") as f:
+            f.write(json.dumps(log) + "\n")
+            
     except Exception as e:
         print(f"Error saving to log file: {e}")
 
 async def fetch_from_loki(service: str | None = None, limit: int = 100) -> list[dict]:
-    loki_url = os.getenv("LOKI_URL", "http://localhost:3100")
+    loki_url = settings.LOKI_URL
     if not loki_url:
         return []
         
@@ -261,6 +269,38 @@ def generate_logs(
     return sorted(logs, key=lambda x: x["timestamp"], reverse=True)
 
 
+def _read_from_log_file(limit: int = 100) -> list[dict]:
+    """Reads logs from log.txt and returns them as a list of dictionaries."""
+    if not os.path.exists(LOG_FILE):
+        return []
+    
+    logs = []
+    try:
+        with open(LOG_FILE, "r", encoding="utf-8") as f:
+            # Read all lines and take the last ones for efficiency (simple implementation)
+            lines = f.readlines()
+            for line in reversed(lines):
+                if len(logs) >= limit:
+                    break
+                
+                parts = line.strip().split(" ", 4)
+                if len(parts) >= 5:
+                    # Format: YYYY-MM-DD HH:mm:ss LEVEL Source Message
+                    ts = f"{parts[0]}T{parts[1]}Z"
+                    logs.append({
+                        "timestamp": ts,
+                        "level": parts[2],
+                        "service": parts[3],
+                        "message": parts[4],
+                        "trace_id": f"trace_{uuid.uuid4().hex[:16]}",
+                        "span_id": f"span_{uuid.uuid4().hex[:8]}",
+                        "metadata": {"source": "local_file"}
+                    })
+        return logs
+    except Exception as e:
+        print(f"Error reading from log file: {e}")
+        return []
+
 async def query_logs(
     service: str | None = None,
     level: str | None = None,
@@ -277,20 +317,48 @@ async def query_logs(
             loki_logs = [l for l in loki_logs if search.lower() in l["message"].lower()]
         return loki_logs[:limit]
         
-    # Fallback to generated logs
-    logs = generate_logs(count=min(limit * 2, 500), service=service, level=level, save=False)
+    # Fallback: Try reading from log.txt
+    local_logs = _read_from_log_file(limit=limit * 2)
+    
+    if service:
+        local_logs = [l for l in local_logs if l["service"] == service]
+    if level:
+        local_logs = [l for l in local_logs if l["level"] == level]
+    if search:
+        local_logs = [l for l in local_logs if search.lower() in l["message"].lower()]
+        
+    if len(local_logs) > 0:
+        return local_logs[:limit]
+        
+    # If file is empty or missing, generate new ones and SAVE them
+    logs = generate_logs(count=min(limit * 2, 500), service=service, level=level, save=True)
     if search:
         logs = [l for l in logs if search.lower() in l["message"].lower()]
     return logs[:limit]
 
 
 def get_log_stats() -> dict:
-    # Generate logs for stats
-    logs = generate_logs(count=200, save=False)
+    # Sample from log.txt to get real historical stats if available
+    logs = _read_from_log_file(limit=500)
+    
+    # Get actual total line count from file for the "Total Logs" counter
+    total_count = 0
+    if os.path.exists(LOG_FILE):
+        try:
+            with open(LOG_FILE, 'rb') as f:
+                total_count = sum(1 for _ in f)
+        except:
+            total_count = len(logs)
+    
+    if not logs:
+        logs = generate_logs(count=200, save=True)
+        total_count = len(logs)
     
     by_level: dict[str, int] = {}
     by_service: dict[str, int] = {}
+    timeline: dict[str, dict] = {} # Bucket by time
     errors = 0
+    
     for log in logs:
         lvl = log["level"]
         svc = log["service"]
@@ -298,10 +366,32 @@ def get_log_stats() -> dict:
         by_service[svc] = by_service.get(svc, 0) + 1
         if lvl in ("ERROR", "CRITICAL"):
             errors += 1
+            
+        ts_str = log["timestamp"]
+        try:
+            if 'T' in ts_str:
+                time_bucket = ts_str.split('T')[1][:5]
+            else:
+                time_bucket = ts_str.split(' ')[1][:5]
+            
+            if time_bucket not in timeline:
+                timeline[time_bucket] = {"errors": 0, "info": 0}
+            
+            if lvl in ("ERROR", "CRITICAL"):
+                timeline[time_bucket]["errors"] += 1
+            else:
+                timeline[time_bucket]["info"] += 1
+        except:
+            pass
+            
+    formatted_timeline = sorted([
+        {"time": k, **v} for k, v in timeline.items()
+    ], key=lambda x: x["time"])
     
     return {
-        "total": len(logs),
+        "total": total_count,
         "by_level": by_level,
         "by_service": by_service,
         "error_rate": round(errors / len(logs) * 100, 2) if logs else 0.0,
+        "timeline": formatted_timeline[-24:] 
     }

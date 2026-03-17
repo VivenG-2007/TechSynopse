@@ -109,6 +109,7 @@ class PRResponse(BaseModel):
     commit_message: str
     model_used: str
     status: str
+    error_detail: Optional[str] = None
 
 
 class LogResponse(BaseModel):

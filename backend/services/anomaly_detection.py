@@ -92,8 +92,22 @@ def detect_anomalies(count: int = 5) -> list[Anomaly]:
     # Load existing anomalies
     existing = _load_anomalies()
     
-    # If we already have enough, just return them
+    # If we already have enough, refresh timestamps if they are stale (> 24h)
+    now = datetime.utcnow()
+    refreshed = False
     if len(existing) >= count:
+        for a in existing:
+            # Check if older than 24h
+            ts = datetime.fromisoformat(a.timestamp.replace("Z", ""))
+            if (now - ts).total_seconds() > 86400:
+                # Refresh to current window (within last 2 hours)
+                new_ts = now - timedelta(minutes=random.randint(0, 120))
+                a.timestamp = new_ts.isoformat() + "Z"
+                refreshed = True
+        
+        if refreshed:
+            _save_anomalies(existing)
+            
         recent: list[Anomaly] = sorted(existing, key=lambda x: x.timestamp, reverse=True)
         return recent[:count]
     
@@ -106,6 +120,17 @@ def detect_anomalies(count: int = 5) -> list[Anomaly]:
         service = random.choice(SERVICES)
         ts = now - timedelta(minutes=random.randint(0, 120))
 
+        from services.log_service import generate_logs
+        
+        # Generate some synthetic logs related to this anomaly and store them in log.txt
+        related_logs = generate_logs(
+            count=random.randint(5, 15),
+            service=service,
+            level=template["severity"].upper() if template["severity"] != "medium" else "WARNING",
+            inject_anomaly=True,
+            save=True
+        )
+        
         anomaly = Anomaly(
             id=f"anm_{uuid.uuid4().hex[:12]}",
             timestamp=ts.isoformat() + "Z",
@@ -113,9 +138,7 @@ def detect_anomalies(count: int = 5) -> list[Anomaly]:
             severity=template["severity"],
             anomaly_type=template["type"],
             description=_fill(template["description"], service),
-            affected_logs=[
-                f"log_{uuid.uuid4().hex[:8]}" for _ in range(random.randint(3, 15))
-            ],
+            affected_logs=[log["trace_id"] for log in related_logs],
             score=round(random.uniform(0.65, 0.99), 3),
         )
         new_anomalies.append(anomaly)

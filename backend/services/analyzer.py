@@ -22,10 +22,23 @@ IMPORTANT:
 
 def _sanitize_output(text: str) -> str:
     """Removes leaked syntax highlighting tags and other junk from LLM output."""
-    # Remove tags like <color:#5c7a5c"> or "color:#5c7a5c">
-    text = re.sub(r'["\']?color:#[0-9a-fA-F]+["\']?>?', '', text)
-    # Remove any other suspicious HTML-like tags that shouldn't be there
-    text = re.sub(r'<[^>]+>', '', text)
+    if not text:
+        return ""
+    
+    # 1. Remove full tags like <span style="color:#c792ea"> or <font color="...">
+    text = re.sub(r'<[^>]*?style=[^>]*?>', '', text)
+    text = re.sub(r'<[^>]*?color=[^>]*?>', '', text)
+    
+    # 2. Catch partial leaked tags like "color:#c792ea"> or color:#5c7a5c">
+    # Matches patterns like: color:#ABCDEF, "color:#ABCDEF", color: #ABCDEF, etc.
+    text = re.sub(r'["\']?color\s*:\s*#?[0-9a-fA-F]{3,8}["\']?\s*>?', '', text)
+    
+    # 3. Catch common closing tags or stray HTML tags leaked by LLMs
+    text = re.sub(r'</?(?:span|div|font|style|p|br)[^>]*>', '', text)
+    
+    # 4. Final sweep for any remaining suspicious bracket combinations that look like junk
+    text = re.sub(r'style=["\'][^"\']*["\']', '', text)
+    
     return text.strip()
 
 
